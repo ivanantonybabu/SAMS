@@ -65,19 +65,6 @@ The system includes a responsive web dashboard:
 - Face detection and EAR analysis verified in different lighting conditions
 - NodeMCU communication and response times validated for real-time feedback
 
-## 📁 File Structure
-
-/SAMS
-├── raspberry/ # Python backend and face recognition
-├── nodemcu/ # Arduino code for NodeMCU
-├── flask_server/ # Flask-based API
-├── firebase_config/ # Firebase keys and integration
-├── dashboard/ # HTML/CSS/JS frontend
-├── circuit_diagrams/
-├── block_diagram.png
-└── README.md
-
-
 
 ## 🚀 Future Scope
 
