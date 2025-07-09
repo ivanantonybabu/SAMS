@@ -94,7 +94,9 @@ The system includes a responsive web dashboard:
 
 ## 🧠 Developed By
 
-**Team SAMS**  
+**Ivan Antony Babu**  
+Assisted by
+Karun santhosh,Hima H, Naveen c lal,Muhsin ali
 School of Engineering, CUSAT  
 Division of Electronics Engineering
 
