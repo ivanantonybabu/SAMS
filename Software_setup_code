@@ -1,0 +1,52 @@
+from flask import Flask, request, jsonify 
+import subprocess 
+app = Flask(_name_) 
+# Global state 
+recognition_process = None 
+current_uid = None 
+# Mapping UID to period 
+uid_to_period = { 
+"D0371858": "AIC", 
+"44F85141": "PYT" } 
+@app.route('/rfid', methods=['POST']) 
+def rfid(): 
+global recognition_process, current_uid 
+data = request.get_json() 
+uid = data.get('uid') if data else None 
+if not uid: 
+return jsonify({"status": "error", "message": "No UID received"}), 400 
+print("Received UID:", uid) 
+# Start detection if nothing running 
+if recognition_process is None: 
+if uid in uid_to_period: 
+print(f" Starting detection for {uid_to_period[uid]}") 
+recognition_process = subprocess.Popen( 
+["python3", "detectionrealtime3sleep1adding4_modified3.py", uid] 
+) 
+
+current_uid = uid 
+return 
+jsonify({"status": 
+"success", 
+"message": 
+f"Detection 
+started 
+for 
+{uid_to_period[uid]}"}) 
+else: 
+return jsonify({"status": "error", "message": "Unknown UID"}), 400 
+# Stop detection if the same UID taps again 
+elif recognition_process and uid == current_uid: 
+print(f" Stopping detection for {uid_to_period[uid]}") 
+recognition_process.terminate() 
+recognition_process = None 
+current_uid = None 
+# Save attendance 
+#subprocess.run(["python3", "save_attendance_to_db.py", uid]) 
+return jsonify({"status": "success", "message": f"Detection stopped and data saved for 
+{uid_to_period[uid]}"}) 
+else: 
+return jsonify({"status": "info", "message": "Another UID is currently active or mismatched 
+tap"}), 403 
+if _name_ == '_main_': 
+app.run(host='0.0.0.0', port=5000)
