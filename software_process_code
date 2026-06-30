@@ -1,0 +1,255 @@
+import cv2 
+import mediapipe as mp 
+import dlib 
+import numpy as np 
+import sqlite3 
+import time 
+from picamera2 import Picamera2 
+import os 
+import sys 
+import firebase_admin 
+from firebase_admin import credentials, db 
+from datetime import datetime 
+# from auto_firebase_push import push_attendance_to_firestore  # Uncomment if ready 
+# --- PERIOD SELECTION BASED ON RFID UID --- 
+uid = sys.argv[1] if len(sys.argv) > 1 else None 
+uid_to_period = { 
+"D0371858": "AIC", 
+"44F85141": "PYT" 
+} 
+if uid is None or uid not in uid_to_period: 
+print(" Invalid or missing UID. Provide UID as script argument.") 
+sys.exit(1) 
+period_table = uid_to_period[uid] 
+print(f" Period selected: {period_table}") 
+# Firebase setup 
+SERVICE_ACCOUNT_FILE = '/home/Nightsky/firebase-key.json'  #  UPDATE to actual path 
+DATABASE_URL = 'https://sams-minipro-default-rtdb.asia-southeast1.firebasedatabase.app/'  # 
+Correct URL 
+# Initialize Firebase only once 
+if not firebase_admin._apps: 
+cred = credentials.Certificate(SERVICE_ACCOUNT_FILE) 
+firebase_admin.initialize_app(cred, {'databaseURL': DATABASE_URL}) 
+def push_attendance_to_firebase(period_table): 
+conn = sqlite3.connect("students1.db") 
+cursor = conn.cursor() 
+try: 
+cursor.execute(f"SELECT student_id, name, attendance, status, phone_usage, last_seen_time 
+FROM {period_table}") 
+rows = cursor.fetchall() 
+except sqlite3.Error as e: 
+print(f" Error: {e}") 
+conn.close() 
+return 
+class_name = "aicclass_cusat_in" if period_table == "AIC" else "pythonclass_cusat_in" 
+ref = db.reference(f"classes/{class_name}/students") 
+today_midnight = datetime.now().strftime("%Y-%m-%d 00:00:00") 
+for row in rows: 
+student_id, name, attendance, status, phone_usage, last_seen = row  
+# Replace empty or whitespace-only last_seen with today's date at 00:00:00 
+if not last_seen or str(last_seen).strip() == "": 
+last_seen = today_midnight 
+data = { 
+"id": student_id, 
+"name": name, 
+"isPresent": attendance.upper() == "P", 
+"isSleeping": status.lower() == "sleeping", 
+"isUsingPhone": False,  # Always False per your setup 
+"lastSeen": last_seen 
+} 
+ref.child(str(student_id)).set(data)  #  Use student_id as key 
+conn.close() 
+print(f" Data successfully pushed to Firebase for class: {period_table}") 
+# --- DATABASE INITIALIZATION --- 
+conn = sqlite3.connect("students1.db") 
+cursor = conn.cursor() 
+cursor.execute(f"DELETE FROM {period_table}") 
+conn.commit() 
+conn.close() 
+# --- SETUP FACE DETECTION --- 
+mp_face_detection = mp.solutions.face_detection 
+face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.6) 
+name_map = { 
+"karunorg": "Karun Santhosh", 
+"ivan": "Ivan Antony Babu", 
+"naveen": "Naveen C Lal", 
+"muhsin": "Muhsin Ali" 
+} 
+def extract_name(full_path): 
+return os.path.basename(full_path).split('.')[0] 
+def load_encodings(): 
+conn = sqlite3.connect("students1.db") 
+cursor = conn.cursor() 
+cursor.execute("SELECT name, encoding FROM students") 
+known_names, known_encodings = [], [] 
+for name, encoding in cursor.fetchall(): 
+known_names.append(extract_name(name)) 
+known_encodings.append(np.frombuffer(encoding, dtype=np.float64)) 
+conn.close() 
+return known_names, known_encodings 
+def insert_or_update_student(name, status, sleep_duration): 
+if name == "Unknown": return 
+conn = sqlite3.connect("students1.db") 
+cursor = conn.cursor() 
+timestamp = time.strftime("%Y-%m-%d %H:%M:%S") 
+cursor.execute(f"SELECT * FROM {period_table} WHERE name = ?", (name,)) 
+result = cursor.fetchone() 
+if result: 
+cursor.execute(f""" 
+UPDATE {period_table} SET last_seen_time = ?, status = ?, sleep_duration = ?,  
+phone_usage = '', phone_detected_time = '' WHERE name = ? 
+""", (timestamp, status, sleep_duration, name)) 
+else: 
+cursor.execute(f""" 
+INSERT INTO {period_table} ( 
+name, first_recognition_time, last_seen_time, status,  
+sleep_duration, phone_usage, phone_detected_time, attendance 
+) VALUES (?, ?, ?, ?, ?, '', '', 'P') 
+""", (name, timestamp, timestamp, status, sleep_duration)) 
+conn.commit() 
+conn.close() 
+# --- CAMERA INITIALIZATION --- 
+known_names, known_encodings = load_encodings() 
+picam2 = Picamera2() 
+picam2.preview_configuration.main.size = (640, 480) 
+picam2.preview_configuration.main.format = "RGB888" 
+picam2.preview_configuration.controls.FrameRate = 30 
+picam2.configure("preview") 
+picam2.start() 
+cv2.namedWindow("Face & Sleep Detection", cv2.WINDOW_NORMAL) 
+cv2.resizeWindow("Face & Sleep Detection", 800, 600) 
+dummy = np.zeros((200, 800, 3), dtype=np.uint8) 
+cv2.putText(dummy, "Press 'a' to start detection", (100, 100), 
+cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 3) 
+cv2.imshow("Face & Sleep Detection", dummy) 
+face_recognizer = dlib.face_recognition_model_v1("dlib_face_recognition_resnet_model_v1.dat") 
+shape_predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat") 
+LEFT_EYE_INDICES = list(range(36, 42)) 
+RIGHT_EYE_INDICES = list(range(42, 48)) 
+def eye_aspect_ratio(eye): 
+A = np.linalg.norm(eye[1] - eye[5]) 
+B = np.linalg.norm(eye[2] - eye[4]) 
+C = np.linalg.norm(eye[0] - eye[3]) 
+return (A + B) / (2.0 * C) 
+EYE_CLOSED_THRESHOLD = 0.30 
+EYE_CLOSED_DURATION = 2 
+print("\n Press 'a' to start face & sleep detection. Press 'q' to quit.\n") 
+drowsy_start_time = {} 
+detection_active = False 
+recognition_counter = {} 
+confirmed_names = {} 
+confirmation_threshold = 5 
+recognition_timeout = 20 
+# --- DETECTION LOOP --- 
+while True: 
+key = cv2.waitKey(1) & 0xFF 
+if key == ord('a'): 
+
+detection_active = True 
+print(" Detection started.") 
+elif key == ord('q'): 
+print(" Exiting...") 
+break 
+if not detection_active: 
+continue 
+try: 
+frame = picam2.capture_array() 
+gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) 
+clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)) 
+gray = clahe.apply(gray) 
+rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) 
+results = face_detection.process(rgb) 
+if results.detections: 
+for detection in results.detections: 
+bbox = detection.location_data.relative_bounding_box 
+h, w, _ = frame.shape 
+x, y, width, height = int(bbox.xmin * w), int(bbox.ymin * h), int(bbox.width * w), 
+int(bbox.height * h) 
+if width < 50 or height < 50: continue 
+face_roi = rgb[y:y+height, x:x+width] 
+if face_roi.size == 0: continue 
+face_roi = cv2.resize(face_roi, (224, 224)) 
+face_rect = dlib.rectangle(x, y, x + width, y + height) 
+shape = shape_predictor(rgb, face_rect) 
+face_desc = face_recognizer.compute_face_descriptor(rgb, shape) 
+face_encoding = np.array(face_desc).reshape(1, -1) 
+name = "Unknown" 
+if known_encodings: 
+distances = np.linalg.norm(known_encodings - face_encoding, axis=1) 
+idx = np.argmin(distances) 
+if distances[idx] < 0.5: 
+raw_name = known_names[idx] 
+name_mapped = name_map.get(raw_name, raw_name) 
+recognition_counter[name_mapped] = recognition_counter.get(name_mapped, 0) + 1 
+if recognition_counter[name_mapped] >= confirmation_threshold: 
+confirmed_names["face"] = (name_mapped, time.time()) 
+if name == "Unknown" and "face" in confirmed_names: 
+confirmed_name, confirmed_time = confirmed_names["face"] 
+if time.time() - confirmed_time < recognition_timeout: 
+name = confirmed_name 
+else: 
+confirmed_names.pop("face", None) 
+elif "face" in confirmed_names: 
+name = confirmed_names["face"][0] 
+shape_np = np.array([[p.x, p.y] for p in shape.parts()]) 
+left_eye = shape_np[LEFT_EYE_INDICES] 
+right_eye = shape_np[RIGHT_EYE_INDICES] 
+avg_ear = (eye_aspect_ratio(left_eye) + eye_aspect_ratio(right_eye)) / 2.0 
+status, sleep_duration = "Awake", "0 min" 
+if avg_ear < EYE_CLOSED_THRESHOLD: 
+if name not in drowsy_start_time: 
+drowsy_start_time[name] = time.time() 
+elif time.time() - drowsy_start_time[name] >= EYE_CLOSED_DURATION: 
+status = "Sleeping" 
+sleep_duration = f"{int(time.time() - drowsy_start_time[name])} sec" 
+cv2.putText(frame, " SLEEPING", (x, y - 35), 
+cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2) 
+else: 
+drowsy_start_time.pop(name, None) 
+if name != "Unknown": 
+insert_or_update_student(name, status, sleep_duration) 
+cv2.rectangle(frame, (x, y), (x + width, y + height), (0, 255, 0), 2) 
+cv2.putText(frame, name, (x, y - 10), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 
+255), 2)cv2.putText(frame, f"EAR: {avg_ear:.2f}", (x, y + height + 20), 
+cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 255, 200), 2) 
+cv2.polylines(frame, [left_eye], isClosed=True, color=(255, 0, 0), thickness=1) 
+cv2.polylines(frame, [right_eye], isClosed=True, color=(255, 0, 0), thickness=1) 
+cv2.imshow("Face & Sleep Detection", cv2.resize(frame, (800, 600))) 
+except Exception as e: 
+print(f"Error: {e}") 
+break 
+cv2.destroyAllWindows() 
+picam2.stop() 
+# --- MARK ABSENTEES --- 
+conn = sqlite3.connect("students1.db") 
+cursor = conn.cursor() 
+cursor.execute(f"SELECT name FROM {period_table} WHERE attendance = 'P'") 
+present_students = set(row[0] for row in cursor.fetchall()) 
+cursor.execute("SELECT name FROM students") 
+short_names = [extract_name(name) for (name,) in cursor.fetchall()] 
+full_name_map = {extract_name(k): v for k, v in name_map.items()} 
+all_full_names = [full_name_map.get(sn, sn) for sn in short_names] 
+for full_name in all_full_names: 
+if full_name not in present_students: 
+cursor.execute(f"SELECT COUNT(*) FROM {period_table} WHERE name = ?", 
+(full_name,)) 
+if cursor.fetchone()[0] == 0: 
+cursor.execute(f""" 
+INSERT INTO {period_table} ( 
+name, first_recognition_time, last_seen_time, status,  
+sleep_duration, phone_usage, phone_detected_time, attendance 
+) VALUES (?, '', '', '', '', '', '', 'A') 
+""", (full_name,)) 
+conn.commit() 
+# --- FINAL REPORT --- 
+print(f"\n         
+Final Attendance for {period_table}:\n") 
+cursor.execute(f"SELECT * FROM {period_table}") 
+for row in cursor.fetchall(): 
+print(row) 
+conn.close() 
+# Optional Firebase upload 
+print("\n Uploading data to Firebase...") 
+print(f" Data successfully pushed to Firebase for class: {period_table}") 
+push_attendance_to_firebase(period_table) 
+print(" Data push complete.")
